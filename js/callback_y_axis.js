@@ -1,12 +1,13 @@
-var selected_y_axis = cb_obj.value
-var data_visible = source_visible.data
-const inverted_axis = inverted.active
+"use strict";
 
-data_visible.y = data_visible[axis_map[selected_y_axis]]
-source_visible.change.emit()
-yaxis.attributes.axis_label = selected_y_axis
-yaxis.change.emit()
+const selected_y_axis = cb_obj.value;
+const data_visible = source_visible.data;
+const inverted_axis = inverted.active;
 
-p.reset.emit()
-inverted.active = []
-inverted.active = inverted_axis
+data_visible.y = data_visible[axis_map[selected_y_axis]] || [];
+source_visible.change.emit();
+yaxis.axis_label = selected_y_axis;
+yaxis.change.emit();
+
+p.reset.emit();
+inverted.active = inverted_axis;

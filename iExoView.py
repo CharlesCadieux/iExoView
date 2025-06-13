@@ -1,346 +1,343 @@
+# %%
 """
 iExoView, the Interactive Exoplanet Viewer
 astro.umontreal.ca/~charles/iExoView.html
 
-@author: CharlesCadieux 2022
+@author: Charles Cadieux 2019-2022
+@updated: 2025
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-
 import requests
-
-from astropy.table import Table, Row, Column
-from astropy.io import ascii
+from datetime import datetime
+from astropy.table import Table, Column
 from astropy import units as u
 from astropy.coordinates import Angle
-
-from datetime import datetime
-
+from bokeh.plotting import figure, output_file, show, ColumnDataSource
+from bokeh.models import (Circle, CustomJS, Label, ColorBar, LogColorMapper,
+                         LogAxis, LogTicker, Slider, RangeSlider, Select, Div,
+                         TextInput, Button, CheckboxGroup, CheckboxButtonGroup,
+                         Scatter)
+from bokeh.models.tools import TapTool
+from bokeh.layouts import layout, row, column
+from bokeh import events
 from exofile.archive import ExoFile
+from utils import bulkrho, semiamp, mass_est, semima, Teq, TSM, ESM, atmosig, find_nearest
 
-from utils import *
-
-##### Import data #####
-
-# NASA Exoplanet Archive data using exofile (github.com/AntoineDarveau/exofile)
+# %%
+# Import data
 tbl = ExoFile.load()
-# Unit conversion
-tbl['pl_trandep'] *= 10 # Transit depth from percents to part-per-thousands (ppt)
-tbl['st_lum'] = 10**tbl['st_lum'] # Stellar luminosity in solar lum.
+tbl['pl_trandep'] *= 10  # Transit depth: percent to ppt
+tbl['st_lum'] = 10**tbl['st_lum']  # Stellar luminosity in solar units
 
 # TOI data from ExoFOP
-TOI = requests.get(
-    "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv")
-# From txt to Table
-colnames = TOI.text[0:965]
-colnames = list(colnames.split(","))
-tblTOI = Table.read(TOI.text, format = "ascii", names = colnames, data_start = 1)
-# Remove Known Planets and False Positive TOIs
-tblTOI['TFOPWG Disposition'].mask = False
-indexTOI, = np.where((tblTOI['TFOPWG Disposition'] == '0') |
-                     (tblTOI['TFOPWG Disposition'] == 'PC') |
-                     (tblTOI['TFOPWG Disposition'] == 'CP'))
-tblTOI = tblTOI[indexTOI]
-numberTOI = len(tblTOI)
+toi_response = requests.get(
+    "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"
+)
 
-# Table 5 from Pecaut & Mamajek 2013
-spectral = requests.get(
-    "http://www.pas.rochester.edu/~emamajek/EEM_dwarf_UBVIJHK_colors_Teff.txt")
-tblSpT = Table.read(spectral.text,
-                    format = 'ascii.csv',
-                    delimiter = ' ',
-                    comment = '&',
-                    header_start = 22,
-                    data_start = 23,
-                    data_end = 141)
-del tblSpT['#SpT_1']
-tblSpT.rename_column('#SpT', 'SpT')
+# Parse TOI data into Table
+tbl_toi = Table.read(toi_response.text, format="ascii.csv", data_start=1, delimiter=',')
+tbl_toi['TFOPWG Disposition'].mask = False
+valid_toi_idx = np.where(
+    (tbl_toi['TFOPWG Disposition'] == '0') |
+    (tbl_toi['TFOPWG Disposition'] == 'PC')
+)[0]
+tbl_toi = tbl_toi[valid_toi_idx]
+number_toi = len(tbl_toi)
 
+# Spectral type data (Pecaut & Mamajek 2013)
+spectral_response = requests.get(
+    "http://www.pas.rochester.edu/~emamajek/EEM_dwarf_UBVIJHK_colors_Teff.txt"
+)
+tbl_spt = Table.read(
+    spectral_response.text, format='ascii.csv', delimiter=' ', comment='&',
+    header_start=22, data_start=23, data_end=141
+)
+del tbl_spt['#SpT_1']
+tbl_spt.rename_column('#SpT', 'SpT')
 
-##### Create master table with Known exoplanets, TOIs and K2 planets #####
-
-#DEBUG
-numberTOI = 1
-
+# %%
 # Populate TOIs
-for i in range(numberTOI):
-    TICid = tblTOI['TIC ID'][i]
+# DEBUG: Limit to 1 TOI for testing
+#number_toi = 1
+col_starts_stellar = (
+    0, 25, 43, 65, 87, 109, 131, 153, 175, 197, 219, 241, 263, 285, 307,
+    329, 351, 373, 395, 417, 439, 461, 483, 505, 530, 552, 574, 599, 621,
+    643, 665, 687, 709, 731, 749, 767
+)
+col_starts_mag = (0, 18, 36, 54, 79, 99, 117, 135)
+
+new_row_number = 0
+for i in range(number_toi):
+    tic_id = tbl_toi['TIC ID'][i]
     try:
-        # Open the TOI page on ExoFOP to obtain additional parameters
-        ExoFop = requests.get(
-            "https://exofop.ipac.caltech.edu/tess/download_target.php?id={0}"
-            .format(TICid))
+        exofop_response = requests.get(
+            f"https://exofop.ipac.caltech.edu/tess/download_target.php?id={tic_id}"
+        )
+        exofop_text = exofop_response.text
 
-        # Host Star Parameters
-        index1 = ExoFop.text.find("STELLAR PARMAMETERS")
-        index2 = ExoFop.text.find("MAGNITUDES")
-        st = Table.read(ExoFop.text[index1:index2:],
-               format = 'ascii.fixed_width',
-               col_starts=(0, 25, 43, 65, 87, 109, 131, 153, 175, 197, 219, 241,
-               263, 285, 307, 329, 351, 373, 395, 417, 439, 461, 483, 505, 530,
-               552, 574, 599, 621, 643, 665, 687, 709, 731, 749, 767),
-               header_start = 1,
-               data_start = 2)
+        # Parse stellar parameters
+        idx1 = exofop_text.find("STELLAR PARMAMETERS")
+        idx2 = exofop_text.find("MAGNITUDES")
+        stellar_params = Table.read(
+            exofop_text[idx1:idx2], format='ascii.fixed_width',
+            col_starts=col_starts_stellar, header_start=1, data_start=2
+        )
 
-        # Magnitudes
-        index1 = ExoFop.text.find("MAGNITUDES")
-        index2 = ExoFop.text.find("IMAGING OBSERVATIONS")
-        mag = Table.read(ExoFop.text[index1:index2:],
-            format = 'ascii.fixed_width',
-            col_starts=(0, 18, 36, 54, 79, 99, 117, 135),
-            header_start = 1,
-            data_start = 2)
-        indexV, = np.where(mag['Band'] == 'V')
-        indexG, = np.where(mag['Band'] == 'Gaia')
-        indexJ, = np.where(mag['Band'] == 'J')
-        indexH, = np.where(mag['Band'] == 'H')
-        indexK, = np.where(mag['Band'] == 'K')
+        # Parse magnitudes
+        idx1 = exofop_text.find("MAGNITUDES")
+        idx2 = exofop_text.find("IMAGING OBSERVATIONS")
+        magnitudes = Table.read(
+            exofop_text[idx1:idx2], format='ascii.fixed_width',
+            col_starts=col_starts_mag, header_start=1, data_start=2
+        )
+        idx_v = np.where(magnitudes['Band'] == 'V')[0]
+        idx_g = np.where(magnitudes['Band'] == 'Gaia')[0]
+        idx_j = np.where(magnitudes['Band'] == 'J')[0]
+        idx_h = np.where(magnitudes['Band'] == 'H')[0]
+        idx_k = np.where(magnitudes['Band'] == 'K')[0]
 
-        # TOI planetary parameter estimation
-        masse = mass_est(tblTOI['Planet Radius (R_Earth)'][i])
-        rho = bulkrho(masse, tblTOI['Planet Radius (R_Earth)'][i])
-        K = semiamp(tblTOI['Period (days)'][i],
-                    masse,
-                    tblTOI['Planet Radius (R_Earth)'][i],
-                    float(st['Mass (M_Sun)'][0]),
-                    90,
-                    0)
+        # Estimate planetary parameters
+        masse = tbl_toi['Predicted Mass (M_Earth)'][i]
+        density = bulkrho(masse, tbl_toi['Planet Radius (R_Earth)'][i])
+        rv_amplitude = semiamp(
+            tbl_toi['Period (days)'][i], masse,
+            tbl_toi['Planet Radius (R_Earth)'][i],
+            float(stellar_params['Mass (M_Sun)'][0]), 90, 0
+        )
 
-    except:
-        print('Error with TIC {0}'.format(TICid))
-        numberTOI -= 1
+        # Add row to table
+        new_row_number += 1
+        print(f"Adding TOI {tbl_toi['TOI'][i]} ({new_row_number}/{number_toi})")
+        tbl.add_row()
+        tbl[-1]['hostname'] = f'TIC {tbl_toi["TIC ID"][i]}'
+        tbl[-1]['rastr'] = str(tbl_toi['RA'][i])
+        tbl[-1]['decstr'] = str(tbl_toi['Dec'][i])
+        tbl[-1]['ra'] = Angle(tbl_toi['RA'][i], unit=u.hour).deg
+        tbl[-1]['dec'] = Angle(tbl_toi['Dec'][i], unit=u.deg).deg
+        tbl[-1]['st_rad'] = tbl_toi['Stellar Radius (R_Sun)'][i]
+        tbl[-1]['st_mass'] = stellar_params['Mass (M_Sun)'][0]
+        tbl[-1]['st_lum'] = stellar_params['Luminosity'][0]
+        tbl[-1]['st_teff'] = tbl_toi['Stellar Eff Temp (K)'][i]
+        tbl[-1]['st_spectype'] = '0'
+        tbl[-1]['sy_dist'] = tbl_toi['Stellar Distance (pc)'][i]
+        if len(idx_v) == 1:
+            tbl[-1]['sy_vmag'] = magnitudes['Value'][idx_v]
+        if len(idx_g) == 1:
+            tbl[-1]['sy_gaiamag'] = magnitudes['Value'][idx_g]
+        if len(idx_j) == 1:
+            tbl[-1]['sy_jmag'] = magnitudes['Value'][idx_j]
+        if len(idx_h) == 1:
+            tbl[-1]['sy_hmag'] = magnitudes['Value'][idx_h]
+        if len(idx_k) == 1:
+            tbl[-1]['sy_kmag'] = magnitudes['Value'][idx_k]
+        tbl[-1]['pl_name'] = f'TOI {tbl_toi["TOI"][i]}'
+        tbl[-1]['pl_bmassprov'] = 'Mass Estimate'
+        tbl[-1]['pl_bmasse'] = np.round(masse, 2)
+        tbl[-1]['pl_rade'] = tbl_toi['Planet Radius (R_Earth)'][i]
+        tbl[-1]['pl_dens'] = np.round(density, 2)
+        tbl[-1]['pl_orbper'] = tbl_toi['Period (days)'][i]
+        tbl[-1]['pl_trandur'] = tbl_toi['Duration (hours)'][i]
+        tbl[-1]['pl_orbsmax'] = 0  # Estimated later
+        tbl[-1]['pl_eqt'] = tbl_toi['Planet Equil Temp (K)'][i]
+        tbl[-1]['pl_insol'] = tbl_toi['Planet Insolation (Earth Flux)'][i]
+        tbl[-1]['pl_rvamp'] = np.round(rv_amplitude, 2)
+        tbl[-1]['pl_bmasselim'] = 0
+        tbl[-1]['tran_flag'] = 1
+        tbl[-1]['pl_trandep'] = tbl_toi['Depth (ppm)'][i] / 1000  # in ppt
+        tbl[-1]['disc_facility'] = 'Transiting Exoplanet Survey Satellite (TESS)'
+    except Exception as e:
+        print(f"Error processing TIC {tic_id}: {e}")
         continue
 
-    # Add row to master tbl
-    tbl.add_row()
-    tbl[-1]['hostname'] = 'TIC {0}'.format(tblTOI['TIC ID'][i])
-    tbl[-1]['rastr'] = str(tblTOI["RA"][i])
-    tbl[-1]['decstr'] = str(tblTOI["Dec"][i])
-    tbl[-1]['ra'] = Angle(tblTOI["RA"][i], unit=u.hour).deg
-    tbl[-1]['dec'] = Angle(tblTOI["Dec"][i], unit = u.deg).deg
-    tbl[-1]['st_rad'] = tblTOI['Stellar Radius (R_Sun)'][i]
-    tbl[-1]['st_mass'] = st['Mass (M_Sun)'][0]
-    tbl[-1]['st_lum'] = st['Luminosity'][0]
-    tbl[-1]['st_teff'] = tblTOI['Stellar Eff Temp (K)'][i]
-    tbl[-1]['st_spectype'] = 0
-    tbl[-1]['sy_dist'] = tblTOI['Stellar Distance (pc)'][i]
-    if len(indexV) == 1 : tbl[-1]['sy_vmag'] = mag['Value'][indexV]
-    if len(indexG) == 1 : tbl[-1]['sy_gaiamag'] = mag['Value'][indexG]
-    if len(indexJ) == 1 : tbl[-1]['sy_jmag'] = mag['Value'][indexJ]
-    if len(indexH) == 1 : tbl[-1]['sy_hmag'] = mag['Value'][indexH]
-    if len(indexK) == 1 : tbl[-1]['sy_kmag'] = mag['Value'][indexK]
-    tbl[-1]['pl_name'] = 'TOI {0}'.format(tblTOI['TOI'][i])
-    tbl[-1]['pl_bmassprov'] = 'Mass Estimate'
-    tbl[-1]['pl_bmasse'] = np.round(masse, 2)
-    tbl[-1]['pl_rade'] = tblTOI['Planet Radius (R_Earth)'][i]
-    tbl[-1]['pl_dens'] = np.round(rho, 2)
-    tbl[-1]['pl_orbper'] = tblTOI['Period (days)'][i]
-    tbl[-1]['pl_trandur'] = tblTOI['Duration (hours)'][i]
-    tbl[-1]['pl_orbsmax'] = 0 # To be estimated later
-    tbl[-1]['pl_eqt'] = tblTOI['Planet Equil Temp (K)'][i]
-    tbl[-1]['pl_insol'] = tblTOI['Planet Insolation (Earth Flux)'][i]
-    tbl[-1]['pl_rvamp'] = np.round(K, 2)
-    tbl[-1]['pl_bmasselim'] = 0
-    tbl[-1]['tran_flag'] = 1
-    tbl[-1]['pl_trandep'] = tblTOI['Depth (ppm)'][i] / 1000 # in ppt
-    tbl[-1]['disc_facility'] = 'Transiting Exoplanet Survey Satellite (TESS)'
-
+# Making sure we have the right number of TOIs added
+number_toi = new_row_number
 
 # Populate K2 planets with unknown mass
-indexK2, = np.where((tbl['disc_facility'] == 'K2') &
+k2_idx, = np.where((tbl['disc_facility'] == 'K2') &
                     (tbl['tran_flag'] == 1))
-massindex, = np.where((tbl['pl_bmassprov'] == 'Mass') &
+mass_idx, = np.where((tbl['pl_bmassprov'] == 'Mass') &
                       (tbl['pl_bmasselim'] == 0))
-indexK2 = np.setdiff1d(indexK2, massindex)
-numberK2 = len(indexK2)
+k2_idx = np.setdiff1d(k2_idx, mass_idx)
+number_k2 = len(k2_idx)
 
-for i in indexK2:
-    # K2 planets parameter estimation
+for i in k2_idx:
     masse = mass_est(tbl['pl_rade'][i])
-    rho = bulkrho(masse, tbl['pl_rade'][i])
-    K = semiamp(tbl['pl_orbper'][i],
-                masse,
-                tbl['pl_rade'][i],
-                tbl['st_mass'][i],
-                90,
-                0)
+    density = bulkrho(masse, tbl['pl_rade'][i])
+    rv_amplitude = semiamp(
+        tbl['pl_orbper'][i], masse, tbl['pl_rade'][i], tbl['st_mass'][i], 90, 0
+    )
     tbl[i]['pl_bmassprov'] = 'Mass Estimate'
     tbl[i]['pl_bmasse'] = masse
-    tbl[i]['pl_dens'] = rho
-    tbl[i]['pl_rvamp'] = K
+    tbl[i]['pl_dens'] = density
+    tbl[i]['pl_rvamp'] = rv_amplitude
     tbl[i]['pl_bmasselim'] = 0
 
 
-##### Clean master table #####
+# Clean table
+valid_idx = np.where((tbl['tran_flag'] == 1) & (tbl['pl_rade'] > 0))[0]
+tbl = tbl[valid_idx]
+valid_idx = np.where(
+    (tbl['pl_bmassprov'] == 'Mass') |
+    (tbl['pl_bmassprov'] == 'Msini') |
+    (tbl['pl_bmassprov'] == 'Msin(i)/sin(i)') |
+    (tbl['pl_bmassprov'] == 'Mass Estimate')
+)[0]
+tbl = tbl[valid_idx]
+valid_idx = np.where(tbl['pl_bmasselim'] == 0)[0]
+tbl = tbl[valid_idx]
+k2_idx = np.where(
+    (tbl['disc_facility'] == 'K2') & (tbl['pl_bmassprov'] == 'Mass Estimate')
+)[0]
 
-# Keep only transiting planets with known radius
-good, = np.where((tbl['tran_flag'] == 1) &
-                 (tbl['pl_rade'] > 0))
-tbl = tbl[good]
-good, = np.where((tbl['pl_bmassprov'] == 'Mass') |
-                 (tbl['pl_bmassprov'] == 'Msini') |
-                 (tbl['pl_bmassprov'] == 'Msin(i)/sin(i)') |
-                 (tbl['pl_bmassprov'] == 'Mass Estimate'))
-tbl = tbl[good]
-# Keep only planets with known mass (no upper/lower limit)
-good, = np.where(tbl['pl_bmasselim'] == 0)
-tbl = tbl[good]
-# Update indexK2
-indexK2, = np.where((tbl['disc_facility'] == 'K2') &
-                    (tbl['pl_bmassprov'] == 'Mass Estimate'))
-
-
-##### Fill in missing parameters #####
-
-# Color dictionary for print output (black: observed value, red: estimation)
+# %%
+# Fill missing parameters
 c_dict = {}
-c_dict['mass'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['mass'][indexK2] = '#ff0000'
-c_dict['mass'][-1 * numberTOI:] = '#ff0000'
+c_dict['mass'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['mass'][k2_idx] = '#ff0000'
+c_dict['mass'][-number_toi:] = '#ff0000'
 
 # Semi-major axis
 tbl['pl_orbsmax'].mask = False
 sma = semima(tbl['pl_orbper'].data, tbl['st_mass'].data)
-index, = np.where(tbl['pl_orbsmax'] == 0)
-tbl['pl_orbsmax'][index] = sma[index]
-c_dict['semima'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['semima'][index] = '#ff0000'
-index, = np.where(tbl['pl_orbsmax'].mask == 1)
-tbl['pl_orbsmax'][index] = 0
+sma_idx = np.where(tbl['pl_orbsmax'] == 0)[0]
+tbl['pl_orbsmax'][sma_idx] = sma[sma_idx]
+c_dict['semima'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['semima'][sma_idx] = '#ff0000'
+mask_idx = np.where(tbl['pl_orbsmax'].mask)[0]
+tbl['pl_orbsmax'][mask_idx] = 0
 
 # Equilibrium temperature
 tbl['pl_eqt'].mask = False
 teq = Teq(tbl['st_rad'].data, tbl['st_teff'].data, tbl['pl_orbsmax'].data)
-index, = np.where(tbl['pl_eqt'] == 0)
-tbl['pl_eqt'][index] = teq[index]
-c_dict['teq'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['teq'][index] = '#ff0000'
-index, = np.where(tbl['pl_eqt'].mask == 1)
-tbl['pl_eqt'][index] = 0
+teq_idx = np.where(tbl['pl_eqt'] == 0)[0]
+tbl['pl_eqt'][teq_idx] = teq[teq_idx]
+c_dict['teq'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['teq'][teq_idx] = '#ff0000'
+mask_idx = np.where(tbl['pl_eqt'].mask)[0]
+tbl['pl_eqt'][mask_idx] = 0
 
 # Bulk density
 tbl['pl_dens'].mask = False
-index, = np.where(tbl['pl_dens'].data == 0)
+dens_idx = np.where(tbl['pl_dens'].data == 0)[0]
 density = bulkrho(tbl['pl_bmasse'].data, tbl['pl_rade'].data)
-tbl['pl_dens'][index] = density[index]
-c_dict['rho'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['rho'][index] = '#ff0000'
-c_dict['rho'][indexK2] = '#ff0000'
-c_dict['rho'][-1 * numberTOI:] = '#ff0000'
-index, = np.where(tbl['pl_dens'].mask == 1)
-tbl['pl_dens'][index] = 0
+tbl['pl_dens'][dens_idx] = density[dens_idx]
+c_dict['rho'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['rho'][dens_idx] = '#ff0000'
+c_dict['rho'][k2_idx] = '#ff0000'
+c_dict['rho'][-number_toi:] = '#ff0000'
+mask_idx = np.where(tbl['pl_dens'].mask)[0]
+tbl['pl_dens'][mask_idx] = 0
 
 # Insolation
 tbl['pl_insol'].mask = False
-index, = np.where(tbl['pl_insol'].data == 0)
-insol = (tbl['st_rad'].data**2 * (tbl['st_teff'].data / 5777)**4
-        / tbl['pl_orbsmax'].data**2)
-tbl['pl_insol'][index] = insol[index]
-c_dict['insol'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['insol'][index] = '#ff0000'
-index, = np.where(tbl['pl_insol'].mask == 1)
-tbl['pl_insol'][index] = 0
+insol_idx = np.where(tbl['pl_insol'].data == 0)[0]
+insol = (
+    tbl['st_rad'].data**2 * (tbl['st_teff'].data / 5777)**4 /
+    tbl['pl_orbsmax'].data**2
+)
+tbl['pl_insol'][insol_idx] = insol[insol_idx]
+c_dict['insol'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['insol'][insol_idx] = '#ff0000'
+mask_idx = np.where(tbl['pl_insol'].mask)[0]
+tbl['pl_insol'][mask_idx] = 0
 
 # RV semi-amplitude
 tbl['pl_rvamp'].mask = False
-index, = np.where(tbl['pl_rvamp'].data == 0)
-K = semiamp(tbl['pl_orbper'].data,
-            tbl['pl_bmasse'].data,
-            tbl['pl_rade'].data,
-            tbl['st_mass'].data,
-            90,
-            0)
-tbl['pl_rvamp'][index] = K[index]
-c_dict['K'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['K'][index] = '#ff0000'
-c_dict['K'][indexK2] = '#ff0000'
-c_dict['K'][-1 * numberTOI:] = '#ff0000'
-index, = np.where(tbl['pl_rvamp'].mask == 1)
-tbl['pl_rvamp'][index] = 0
+rv_idx = np.where(tbl['pl_rvamp'].data == 0)[0]
+rv_amplitude = semiamp(
+    tbl['pl_orbper'].data, tbl['pl_bmasse'].data, tbl['pl_rade'].data,
+    tbl['st_mass'].data, 90, 0
+)
+tbl['pl_rvamp'][rv_idx] = rv_amplitude[rv_idx]
+c_dict['K'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['K'][rv_idx] = '#ff0000'
+c_dict['K'][k2_idx] = '#ff0000'
+c_dict['K'][-number_toi:] = '#ff0000'
+mask_idx = np.where(tbl['pl_rvamp'].mask)[0]
+tbl['pl_rvamp'][mask_idx] = 0
 
-# Add atmospheric signal in master table
-atmosigcol = Column(name = 'pl_atmosig', data = np.zeros(len(tbl['pl_name'])))
-tbl.add_column(atmosigcol, 66)
+# Atmospheric signal
+atmosig_col = Column(name='pl_atmosig', data=np.zeros(len(tbl['pl_name'])))
+tbl.add_column(atmosig_col, 66)
 mu_array = np.zeros(len(tbl['pl_name']))
-for i in range(len(tbl['pl_name'])):
-    if tbl['pl_rade'][i] <= 2 : mu = 28.97 # Earth's atmosphere mu
-    elif 2 < tbl['pl_rade'][i] <= 6 : mu = 2.61  # Neptune's atmosphere mu
-    elif tbl['pl_rade'][i] > 6 : mu = 2.22  # Jupiter's atmosphere mu
-    else: print('Planetary radius unknown for {0}'.format(tbl['pl_name'][i]))
-    mu_array[i] = mu
+for i, rade in enumerate(tbl['pl_rade']):
+    mu_array[i] = (
+        28.97 if rade <= 2 else 2.61 if 2 < rade <= 6 else 2.22
+    )
+tbl['pl_atmosig'] = atmosig(
+    tbl['pl_eqt'].data, tbl['st_rad'].data, tbl['pl_dens'].data, mu_array
+)
+c_dict['red'] = np.array(len(tbl['pl_name']) * ['#ff0000'])
+mask_idx = np.where(tbl['pl_atmosig'].mask)[0]
+tbl['pl_atmosig'][mask_idx] = 0
 
-tbl['pl_atmosig'] = atmosig(tbl['pl_eqt'].data,
-                            tbl['st_rad'].data,
-                            tbl['pl_dens'].data,
-                            mu_array)
-c_dict['red'] = np.array(len(tbl['pl_name'])*['#ff0000'])
-index, = np.where(tbl['pl_atmosig'].mask == 1)
-tbl['pl_atmosig'][index] = 0
-
-# Add TSM column in master table
-tsmcol = Column(name = 'pl_tsm', data = np.zeros(len(tbl['pl_name'])))
-tbl.add_column(tsmcol, 67)
+# TSM
+tsm_col = Column(name='pl_tsm', data=np.zeros(len(tbl['pl_name'])))
+tbl.add_column(tsm_col, 67)
 tsm = np.zeros(len(tbl['pl_name']))
 for i in range(len(tsm)):
-    tsm[i] = TSM(tbl['pl_rade'][i], tbl['pl_bmasse'][i], tbl['st_rad'][i],
-             tbl['st_teff'][i], tbl['pl_orbsmax'][i], tbl['sy_jmag'][i])
-index, = np.where((np.isnan(tsm)) | (np.isinf(tsm)))
-tsm[index] = 0
+    tsm[i] = TSM(
+        tbl['pl_rade'][i], tbl['pl_bmasse'][i], tbl['st_rad'][i],
+        tbl['st_teff'][i], tbl['pl_orbsmax'][i], tbl['sy_jmag'][i]
+    )
+tsm[np.isnan(tsm) | np.isinf(tsm)] = 0
 tbl['pl_tsm'] = tsm
-index, = np.where(tbl['pl_tsm'].mask == 1)
-tbl['pl_tsm'][index] = 0
+mask_idx = np.where(tbl['pl_tsm'].mask)[0]
+tbl['pl_tsm'][mask_idx] = 0
 
-# Add ESM column in master table
-esmcol = Column(name = 'pl_esm', data = np.zeros(len(tbl['pl_name'])))
-tbl.add_column(esmcol, 68)
+# ESM
+esm_col = Column(name='pl_esm', data=np.zeros(len(tbl['pl_name'])))
+tbl.add_column(esm_col, 68)
 esm = np.zeros(len(tbl['pl_name']))
 for i in range(len(esm)):
-    esm[i] = ESM(tbl['pl_rade'][i], tbl['st_rad'][i], tbl['st_teff'][i],
-                 tbl['pl_orbsmax'][i], tbl["sy_kmag"][i])
-index, = np.where((np.isnan(esm)) | (np.isinf(esm)))
-esm[index] = 0
+    esm[i] = ESM(
+        tbl['pl_rade'][i], tbl['st_rad'][i], tbl['st_teff'][i],
+        tbl['pl_orbsmax'][i], tbl['sy_kmag'][i]
+    )
+esm[np.isnan(esm) | np.isinf(esm)] = 0
 tbl['pl_esm'] = esm
-index, = np.where(tbl['pl_esm'].mask == 1)
-tbl['pl_esm'][index] = 0
+mask_idx = np.where(tbl['pl_esm'].mask)[0]
+tbl['pl_esm'][mask_idx] = 0
 
 # Spectral type
 tbl['st_spectype'].mask = False
 tbl['st_teff'].mask = False
-index, = np.where(tbl['st_spectype'].data == '0')
-c_dict['spt'] = np.array(len(tbl['pl_name'])*['default'])
-for i in index:
+spt_idx = np.where(tbl['st_spectype'].data == '0')[0]
+c_dict['spt'] = np.array(len(tbl['pl_name']) * ['default'])
+for i in spt_idx:
     if tbl['st_teff'][i] > 0:
-        tbl['st_spectype'][i] = tblSpT['SpT'][find_nearest(tblSpT['Teff'], tbl['st_teff'][i])]
+        tbl['st_spectype'][i] = tbl_spt['SpT'][
+            find_nearest(tbl_spt['Teff'], tbl['st_teff'][i])
+        ]
         c_dict['spt'][i] = '#ff0000'
-    else : continue
-index, = np.where(tbl['st_spectype'].mask == 1)
-tbl['st_spectype'][index] = 0
+mask_idx = np.where(tbl['st_spectype'].mask)[0]
+tbl['st_spectype'][mask_idx] = 'N/A'
 
 # Transit depth
 tbl['pl_trandep'].mask = False
-index, = np.where(tbl['pl_trandep'].data == 0)
-depth = ((6.371e6 / 6.956e8)**2
-        * (tbl['pl_rade'].data / tbl['st_rad'].data)**2 * 1000) # in ppt
-tbl['pl_trandep'][index] = depth[index]
-c_dict['depth'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['depth'][index] = '#ff0000'
-index, = np.where(tbl['pl_trandep'].mask == 1)
-tbl['pl_trandep'][index] = 0
+depth_idx = np.where(tbl['pl_trandep'].data == 0)[0]
+depth = (
+    (6.371e6 / 6.956e8)**2 * (tbl['pl_rade'].data / tbl['st_rad'].data)**2 * 1000
+)
+tbl['pl_trandep'][depth_idx] = depth[depth_idx]
+c_dict['depth'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['depth'][depth_idx] = '#ff0000'
+mask_idx = np.where(tbl['pl_trandep'].mask)[0]
+tbl['pl_trandep'][mask_idx] = 0
 
 # Luminosity
 tbl['st_lum'].mask = False
-index, = np.where(tbl['st_lum'].data == 10)
+lum_idx = np.where(tbl['st_lum'].data == 10)[0]
 lum = (tbl['st_rad'].data)**2 * (tbl['st_teff'].data / 5777)**4
-tbl['st_lum'][index] = lum[index]
-c_dict['lum'] = np.array(len(tbl['pl_name'])*['default'])
-c_dict['lum'][index] = '#ff0000'
-index, = np.where(tbl['st_lum'].mask == 1)
-tbl['st_lum'][index] = 0
+tbl['st_lum'][lum_idx] = lum[lum_idx]
+c_dict['lum'] = np.array(len(tbl['pl_name']) * ['default'])
+c_dict['lum'][lum_idx] = '#ff0000'
+mask_idx = np.where(tbl['st_lum'].mask)[0]
+tbl['st_lum'][mask_idx] = 0
 
-
-#### Bokeh interactive plot #####
-
+# %%
 def min_val(x):
     """
     Return the minimum value in array (skipping masked elements)
@@ -379,7 +376,7 @@ def scaleMag(x):
 
     return scale
 
-def findNA(x):
+def find_na(x):
     """
     Finds element that are masked or NaN and return an empty string to display
     """
@@ -394,74 +391,73 @@ def findNA(x):
     listx = list(x)
     for i in index:
         listx[i] = ' '
-    return np.array(listx) # Array works better with bokeh
+    return listx
 
 from bokeh.plotting import figure, output_file, show, ColumnDataSource
-from bokeh.models.markers import Circle
 from bokeh.models import CustomJS, Label, ColorBar, LogColorMapper, LogAxis, LogTicker
 from bokeh.models.widgets import Slider, RangeSlider, Select, Div, TextInput, Button, CheckboxGroup, CheckboxButtonGroup
 from bokeh.models.tools import TapTool
-from bokeh.layouts import layout, row, column
-from bokeh.models.annotations import Title
+from bokeh.layouts import layout, row, column, Spacer
+from bokeh.models import Scatter
 from bokeh import events
 
 # Current date
 date = datetime.today().strftime('%Y-%m-%d')
 
 # Available parameters
-hostname = findNA(tbl['hostname'].data)
-name = findNA(tbl['pl_name'].data)
-ra_str = findNA(tbl['rastr'].data)
-dec_str = findNA(tbl['decstr'].data)
-ra = findNA(tbl['ra'].data)
-dec = findNA(tbl['dec'].data)
-stmass = findNA(tbl['st_mass'].data)
-stradius = findNA(tbl['st_rad'].data)
-stlum = findNA(tbl['st_lum'].data)
-teff = findNA(tbl['st_teff'].data)
-spt = findNA(tbl['st_spectype'].data)
-dist = findNA(tbl['sy_dist'].data)
-mass = findNA(tbl['pl_bmasse'].data)
-rade = findNA(tbl['pl_rade'].data)
-rho = findNA(tbl['pl_dens'].data)
-period = findNA(tbl['pl_orbper'].data)
-depth = findNA(tbl['pl_trandep'].data)
-dur = findNA(tbl['pl_trandur'].data)
-semima = findNA(tbl['pl_orbsmax'].data)
-teq = findNA(tbl['pl_eqt'].data)
-insol = findNA(tbl['pl_insol'].data)
-K = findNA(tbl['pl_rvamp'].data)
-atmosignal = findNA(tbl['pl_atmosig'].data)
-tsm = findNA(tbl['pl_tsm'].data)
-esm = findNA(tbl['pl_esm'].data)
-vmag = findNA(tbl["sy_vmag"].data)
-gmag = findNA(tbl["sy_gaiamag"].data)
-jmag = findNA(tbl["sy_jmag"].data)
-hmag = findNA(tbl["sy_hmag"].data)
-kmag = findNA(tbl["sy_kmag"].data)
+hostname = find_na(tbl['hostname'])
+name = find_na(tbl['pl_name'])
+ra_str = find_na(tbl['rastr'])
+dec_str = find_na(tbl['decstr'])
+ra = find_na(tbl['ra'])
+dec = find_na(tbl['dec'])
+stmass = find_na(tbl['st_mass'])
+stradius = find_na(tbl['st_rad'])
+stlum = find_na(tbl['st_lum'])
+teff = find_na(tbl['st_teff'])
+spt = find_na(tbl['st_spectype'])
+dist = find_na(tbl['sy_dist'])
+mass = find_na(tbl['pl_bmasse'])
+rade = find_na(tbl['pl_rade'])
+rho = find_na(tbl['pl_dens'])
+period = find_na(tbl['pl_orbper'])
+depth = find_na(tbl['pl_trandep'])
+dur = find_na(tbl['pl_trandur'])
+semima = find_na(tbl['pl_orbsmax'])
+teq = find_na(tbl['pl_eqt'])
+insol = find_na(tbl['pl_insol'])
+K = find_na(tbl['pl_rvamp'])
+atmosignal = find_na(tbl['pl_atmosig'])
+tsm = find_na(tbl['pl_tsm'])
+esm = find_na(tbl['pl_esm'])
+vmag = find_na(tbl["sy_vmag"])
+gmag = find_na(tbl["sy_gaiamag"])
+jmag = find_na(tbl["sy_jmag"])
+hmag = find_na(tbl["sy_hmag"])
+kmag = find_na(tbl["sy_kmag"])
 
 # Size of data points
-size = scaleMag(tbl["sy_jmag"].data)
+size = scaleMag(tbl["sy_jmag"])
 
 # Color of data points
-c = logscale(tbl['pl_eqt'].data)
+c = logscale(tbl['pl_eqt'])
 colors = plt.cm.viridis(c, 1, True)
 c_dict['bokeh'] = np.array(["#%02x%02x%02x" % (r, g, b) for r, g, b in colors[:,0:3]])
 index, = np.where(tbl['pl_eqt'] == 0)
 c_dict['bokeh'][index] = '#707070'
 c_dict['edge'] = np.array(len(name)*['black'])
-c_dict['edge'][indexK2] = 'blue'
-c_dict['edge'][-1 * numberTOI:] = 'red'
+c_dict['edge'][k2_idx] = 'blue'
+c_dict['edge'][-number_toi:] = 'red'
 edge_thick = 1 * np.ones(len(name))
-edge_thick[indexK2] = 1
-edge_thick[-1 * numberTOI:] = 1
+edge_thick[k2_idx] = 1
+edge_thick[-number_toi:] = 1
 edge_alpha = 1 * np.ones(len(name))
 fill_alpha = 0.8 * np.ones(len(name))
 
 # Target type
 targettype = np.array(len(name) * ["Exoplanet"])
-targettype[indexK2] = "K2"
-targettype[-1 * numberTOI:] = "TOI"
+targettype[k2_idx] = "K2"
+targettype[-number_toi:] = "TOI"
 
 # Changing x and y axis mapping
 axis_map = {
@@ -529,8 +525,8 @@ teff_slider = RangeSlider(title = "Stellar Teff (K)",
                           width = 260)
 rade_slider = RangeSlider(title = "Radius (R⊕)",
                           start = 0.1,
-                          end = 40,
-                          value = (0.1, 40),
+                          end = 20,
+                          value = (0.1, 20),
                           step = .1,
                           width = 260)
 checkbox = CheckboxGroup(labels=["Exoplanets", "TOI", "K2"],
@@ -545,10 +541,15 @@ clear = Button(label = "Clear", width = 80)
 download = Button(label = "Download to CSV", button_type = "success", width = 80)
 text = Div(text="""
 <p class="big">
-Update every Monday<br>
-Exoplanets data from <a href="https://exoplanetarchive.ipac.caltech.edu/">Exoplanet Archive</a> <br>
-TOI data from <a href="https://exofop.ipac.caltech.edu/">ExoFop TESS</a><br>
-</p>""", height = 40)
+Data from <a href="https://exoplanetarchive.ipac.caltech.edu/">Exoplanet Archive</a>
+and <a href="https://exofop.ipac.caltech.edu/">ExoFop TESS</a>
+</p>
+
+<p class="big" style="margin-top: 1em;">
+Code available on <a href="https://github.com/CharlesCadieux/iExoView" target="_blank">GitHub</a><br>
+Contact: <a href="mailto:charles.cadieux.1@umontreal.ca">charles.cadieux.1@umontreal.ca</a>
+</p>
+""", height=60)
 figure_title = Div(text = """<font size="+1"> <b> iExoView: The Interactive Exoplanet Viewer </b> </font>""",
                    height = 30)
 
@@ -762,9 +763,9 @@ TOOLTIPS = """
 
 # Generating the figure
 titlestr = ("{0} Transiting Exoplanets with Known Mass + {1} TOI + {2} K2 Planets (as of {3})"
-           ).format(len(tbl) - numberTOI - numberK2, numberTOI, numberK2, date)
-p = figure(plot_width = 1200,
-           plot_height=700,
+           ).format(len(tbl) - number_toi - number_k2, number_toi, number_k2, date)
+p = figure(width = 1120,
+           height=630,
            tools = TOOLS,
            x_axis_type = "log",
            y_axis_type = "log",
@@ -774,34 +775,49 @@ p = figure(plot_width = 1200,
            title = titlestr,
            title_location = 'below',
            toolbar_location = "left")
-p.title.text_font_size = '12pt'
-circle = p.circle('x',
-                  'y',
-                  source = source_visible,
-                  size = 'size',
-                  fill_color = 'bokeh_colors',
-                  fill_alpha = 'fill_alpha',
-                  line_color = 'edge_color',
-                  line_alpha = 'edge_alpha',
-                  line_width = 'edge_thick')
-selected_circle = Circle(fill_color = 'bokeh_colors',
-                         fill_alpha = 'fill_alpha',
-                         line_color = 'edge_color',
-                         line_alpha = 'edge_alpha',
-                         line_width = 'edge_thick')
-nonselected_circle = Circle(fill_color = 'bokeh_colors',
-                            fill_alpha = 'fill_alpha',
-                            line_color = 'edge_color',
-                            line_alpha = 'edge_alpha',
-                            line_width = 'edge_thick')
+p.title.text_font_size = '14pt'
+p.axis.axis_label_text_font_size = '14pt'
+p.axis.major_label_text_font_size = '12pt'
+circle = p.scatter('x',
+                   'y',
+                   source=source_visible,
+                   size='size',
+                   fill_color='bokeh_colors',
+                   fill_alpha='fill_alpha',
+                   line_color='edge_color',
+                   line_alpha='edge_alpha',
+                   line_width='edge_thick')
+
+selected_circle = Scatter(
+    marker="circle",
+    size="size",
+    fill_color='bokeh_colors',
+    fill_alpha='fill_alpha',
+    line_color='edge_color',
+    line_alpha='edge_alpha',
+    line_width='edge_thick'
+)
+
+nonselected_circle = Scatter(
+    marker="circle",
+    size="size",
+    fill_color='bokeh_colors',
+    fill_alpha='fill_alpha',
+    line_color='edge_color',
+    line_alpha='edge_alpha',
+    line_width='edge_thick'
+)
+
 circle.selection_glyph = selected_circle
 circle.nonselection_glyph = nonselected_circle
 xaxis = LogAxis(axis_label = x_axis.value,
                ticker = LogTicker(num_minor_ticks = 10),
-               axis_label_text_font_size = '12pt')
+               axis_label_text_font_size = '14pt')
+xaxis.major_label_text_font_size = '12pt'
 yaxis = LogAxis(axis_label = y_axis.value,
                 ticker = LogTicker(num_minor_ticks = 10),
-                axis_label_text_font_size = '12pt')
+                axis_label_text_font_size = '14pt')
+yaxis.major_label_text_font_size = '12pt'
 p.add_layout(xaxis, 'below')
 p.add_layout(yaxis, 'left')
 
@@ -923,6 +939,9 @@ clear.js_on_event(events.ButtonClick, callback_clear)
 download.js_on_event(events.ButtonClick, callback_download)
 
 
+
+# %%
+
 # Figure legend
 x0, y0 = 0, 1
 legend = figure(title = "Legend",
@@ -941,19 +960,19 @@ legend.title.text_font_style = "normal"
 legend.axis.visible = False
 legend.xgrid.grid_line_color = None
 legend.ygrid.grid_line_color = None
-legend.circle(x0,
+legend.scatter(x0,
               y0,
               size = 15,
               line_color = "black",
               fill_color = "white",
               line_width = 1)
-legend.circle(x0,
+legend.scatter(x0,
               y0 - 0.5,
               size = 15,
               line_color = "red" ,
               fill_color = "white",
               line_width = 1)
-legend.circle(x0,
+legend.scatter(x0,
               y0 - 0.75,
               size = 15,
               line_color = "blue",
@@ -1002,7 +1021,7 @@ j_mag_legend.axis.visible = False
 j_mag_legend.xgrid.grid_line_color = None
 j_mag_legend.ygrid.grid_line_color = None
 for i, m in enumerate(mags):
-    j_mag_legend.circle(x0,
+    j_mag_legend.scatter(x0,
                         y0/1.4**i,
                         size = scaleMag(m),
                         line_color = "black",
@@ -1016,7 +1035,7 @@ for i, m in enumerate(mags):
                   text_font_size = '10pt')
     j_mag_legend.add_layout(label)
 
-j_mag_legend.circle(x0,
+j_mag_legend.scatter(x0,
                     y0/1.4**4,
                     size = scaleMag(14),
                     line_color = "black",
@@ -1032,16 +1051,17 @@ j_mag_legend.add_layout(label)
 
 # Color map
 color_bar = ColorBar(color_mapper = LogColorMapper(palette = "Viridis256",
-                                            low = min_val(tbl['pl_eqt'].data),
-                                            high = max_val(tbl['pl_eqt'].data)),
+                                            low = min_val(tbl['pl_eqt']),
+                                            high = max_val(tbl['pl_eqt'])),
                      ticker = LogTicker(),
                      label_standoff = 10,
                      border_line_color = None,
-                     location = (5, 0),
-                     title = 'Teq (K)',
+                     location = (0, 0),
+                     title = 'Planetary Teq (K)',
                      title_standoff = 10,
                      title_text_align = "center",
-                     title_text_font_style = 'italic')
+                     title_text_font_style = 'italic',
+                     title_text_font_size='12pt')
 p.add_layout(color_bar, 'right')
 
 # Layout
@@ -1063,37 +1083,18 @@ widgets = column(x_axis,
                  search_buttons,
                  download,
                  text,
-                 width = 300)
-layout = row(widgets, p, legends)
+                 width=300)
+# Layout
+legends = column(legend, j_mag_legend, align="end")
+layout = row(widgets, Spacer(width=10), p, legends)
 layout = column(figure_title, layout)
 
+# %%
 # Save as .html
 output_file("iExoView.html", title = 'iExoView')
 show(layout)
-print("Done")
 
-##### Insert Google Analytics #####
-from bs4 import BeautifulSoup
+# %%
 
-with open("iExoView.html", "r") as f:
-    contents = f.read()
-    soup = BeautifulSoup(contents, 'html.parser')
 
-google_str = BeautifulSoup("""
-<!-- Global site tag (gtag.js) - Google Analytics -->
- <script async src="https://www.googletagmanager.com/gtag/js?id=UA-166761240-1"></script>
- <script>
-   window.dataLayer = window.dataLayer || [];
-   function gtag(){dataLayer.push(arguments);}
-   gtag('js', new Date());
 
-   gtag('config', 'UA-166761240-1');
- </script>
-""", 'html.parser')
-soup.head.insert(0, google_str)
-
-with open("iExoView.html", "w") as file:
-    file.write(str(soup))
-
-# import os
-# os.system('rsync -avz -e "ssh -oport=5822" iExoView.html charles@venus.astro.umontreal.ca:/home/charles/www/')
