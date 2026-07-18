@@ -60,7 +60,7 @@ tbl_spt.rename_column('#SpT', 'SpT')
 # %%
 # Populate TOIs
 # DEBUG: Limit to 1 TOI for testing
-#number_toi = 1
+number_toi = 1
 col_starts_stellar = (
     0, 25, 43, 65, 87, 109, 131, 153, 175, 197, 219, 241, 263, 285, 307,
     329, 351, 373, 395, 417, 439, 461, 483, 505, 530, 552, 574, 599, 621,
@@ -274,8 +274,8 @@ mask_idx = np.where(tbl['pl_atmosig'].mask)[0]
 tbl['pl_atmosig'][mask_idx] = 0
 
 # TSM
-tsm_col = Column(name='pl_tsm', data=np.zeros(len(tbl['pl_name'])))
-tbl.add_column(tsm_col, 67)
+#tsm_col = Column(name='pl_tsm', data=np.zeros(len(tbl['pl_name'])))
+#tbl.add_column(tsm_col, 67)
 tsm = np.zeros(len(tbl['pl_name']))
 for i in range(len(tsm)):
     tsm[i] = TSM(
@@ -288,8 +288,8 @@ mask_idx = np.where(tbl['pl_tsm'].mask)[0]
 tbl['pl_tsm'][mask_idx] = 0
 
 # ESM
-esm_col = Column(name='pl_esm', data=np.zeros(len(tbl['pl_name'])))
-tbl.add_column(esm_col, 68)
+#esm_col = Column(name='pl_esm', data=np.zeros(len(tbl['pl_name'])))
+#tbl.add_column(esm_col, 68)
 esm = np.zeros(len(tbl['pl_name']))
 for i in range(len(esm)):
     esm[i] = ESM(
@@ -547,7 +547,7 @@ and <a href="https://exofop.ipac.caltech.edu/">ExoFop TESS</a>
 
 <p class="big" style="margin-top: 1em;">
 Code available on <a href="https://github.com/CharlesCadieux/iExoView" target="_blank">GitHub</a><br>
-Contact: <a href="mailto:charles.cadieux.1@umontreal.ca">charles.cadieux.1@umontreal.ca</a>
+Contact: <a href="mailto:charles.cadieux@unige.ch">charles.cadieux@unige.ch</a>
 </p>
 """, height=60)
 figure_title = Div(text = """<font size="+1"> <b> iExoView: The Interactive Exoplanet Viewer </b> </font>""",
@@ -1091,7 +1091,7 @@ layout = column(figure_title, layout)
 
 # %%
 # Save as .html
-output_file("iExoView.html", title = 'iExoView')
+output_file("index.html", title = 'iExoView')
 show(layout)
 
 # %%
