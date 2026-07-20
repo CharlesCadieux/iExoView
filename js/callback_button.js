@@ -60,6 +60,42 @@ try {
         data_visible[prop] = index.map(i => data_available[prop][i]);
     });
 
+    // Re-point the active colormap field to whatever parameter is
+    // currently selected in the "Colorbar" dropdown.
+    const active_color_key = axis_map[color_select.value];
+
+    // Map a raw value to a Viridis hex color using the same log-normalization
+    // as the Python-side `logscale()` function, so JS-side recoloring stays
+    // visually consistent with the precomputed (static) colormaps.
+    function valueToColor(rawValue, low, high) {
+        const value = parseFloat(rawValue);
+        if (isNaN(value) || value <= 0 || low <= 0 || high <= 0) {
+            return '#707070';
+        }
+        let t = (Math.log10(value) - Math.log10(low)) / (Math.log10(high) - Math.log10(low));
+        t = Math.min(1, Math.max(0, t));
+        const palette = color_bar.color_mapper.palette;
+        const idx = Math.min(palette.length - 1, Math.floor(t * palette.length));
+        return palette[idx];
+    }
+
+    // Teff/Radius get dynamically recolored against the slider's current
+    // bounds (so dot colors always match what the colorbar is showing).
+    // Every other parameter uses its precomputed full-dataset colormap.
+    if (active_color_key === 'teff') {
+        data_visible.bokeh_colors = data_visible.teff.map(v => valueToColor(v, teff_values[0], teff_values[1]));
+        color_bar.color_mapper.low = teff_values[0];
+        color_bar.color_mapper.high = teff_values[1];
+    } else if (active_color_key === 'rade') {
+        data_visible.bokeh_colors = data_visible.rade.map(v => valueToColor(v, rade_values[0], rade_values[1]));
+        color_bar.color_mapper.low = rade_values[0];
+        color_bar.color_mapper.high = rade_values[1];
+    } else {
+        data_visible.bokeh_colors = data_visible['bokeh_colors_' + active_color_key];
+        color_bar.color_mapper.low = color_ranges[active_color_key][0];
+        color_bar.color_mapper.high = color_ranges[active_color_key][1];
+    }
+
     // Compute x/y based on selected axes
     data_visible.x = data_visible[axis_map[selected_x_axis]];
     data_visible.y = data_visible[axis_map[selected_y_axis]];
@@ -86,6 +122,21 @@ try {
     source_visible.change.emit();
     search.value = "";
     p.reset.emit();
+
+    // p.reset.emit() resets ranges asynchronously (next tick), so defer
+    // the re-flip until after that actually happens.
+    setTimeout(() => {
+        if (inverted_axis.includes(0)) {
+            const tmp = p.x_range.start;
+            p.x_range.start = p.x_range.end;
+            p.x_range.end = tmp;
+        }
+        if (inverted_axis.includes(1)) {
+            const tmp = p.y_range.start;
+            p.y_range.start = p.y_range.end;
+            p.y_range.end = tmp;
+        }
+    }, 0);
     inverted.active = inverted_axis;
 } catch (e) {
     console.log("Error in callback_button.js:", e);

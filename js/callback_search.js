@@ -4,7 +4,6 @@ const text = cb_obj.value;
 const data_visible = source_visible.data;
 const len = data_visible.name.length;
 const name = data_visible.name;
-const inverted_axis = inverted.active;
 
 let index = [];
 for (let i = 0; i < len; i++) {
@@ -28,5 +27,3 @@ if (index.length > 0) {
 }
 
 source_visible.change.emit();
-p.reset.emit();
-inverted.active = inverted_axis;

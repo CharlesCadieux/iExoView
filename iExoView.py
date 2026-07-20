@@ -1,7 +1,7 @@
 # %%
 """
 iExoView, the Interactive Exoplanet Viewer
-astro.umontreal.ca/~charles/iExoView.html
+charlescadieux.github.io/iExoView/
 
 @author: Charles Cadieux 2019-2022
 @updated: 2025
@@ -60,7 +60,7 @@ tbl_spt.rename_column('#SpT', 'SpT')
 # %%
 # Populate TOIs
 # DEBUG: Limit to 1 TOI for testing
-number_toi = 1
+#number_toi = 1
 col_starts_stellar = (
     0, 25, 43, 65, 87, 109, 131, 153, 175, 197, 219, 241, 263, 285, 307,
     329, 351, 373, 395, 417, 439, 461, 483, 505, 530, 552, 574, 599, 621,
@@ -73,30 +73,15 @@ for i in range(number_toi):
     tic_id = tbl_toi['TIC ID'][i]
     try:
         exofop_response = requests.get(
-            f"https://exofop.ipac.caltech.edu/tess/download_target.php?id={tic_id}"
+            f"https://exofop.ipac.caltech.edu/tess/target.php?id={tic_id}&json"
         )
-        exofop_text = exofop_response.text
+        data = exofop_response.json()
 
-        # Parse stellar parameters
-        idx1 = exofop_text.find("STELLAR PARMAMETERS")
-        idx2 = exofop_text.find("MAGNITUDES")
-        stellar_params = Table.read(
-            exofop_text[idx1:idx2], format='ascii.fixed_width',
-            col_starts=col_starts_stellar, header_start=1, data_start=2
-        )
+        # Stellar parameters: index [0] is metadata, [1] holds the actual values
+        stellar_params = data['stellar_parameters'][1]
 
-        # Parse magnitudes
-        idx1 = exofop_text.find("MAGNITUDES")
-        idx2 = exofop_text.find("IMAGING OBSERVATIONS")
-        magnitudes = Table.read(
-            exofop_text[idx1:idx2], format='ascii.fixed_width',
-            col_starts=col_starts_mag, header_start=1, data_start=2
-        )
-        idx_v = np.where(magnitudes['Band'] == 'V')[0]
-        idx_g = np.where(magnitudes['Band'] == 'Gaia')[0]
-        idx_j = np.where(magnitudes['Band'] == 'J')[0]
-        idx_h = np.where(magnitudes['Band'] == 'H')[0]
-        idx_k = np.where(magnitudes['Band'] == 'K')[0]
+        # Magnitudes: list of dicts keyed by 'band' -> build a lookup dict
+        mag_lookup = {m['band']: m['value'] for m in data['magnitudes']}
 
         # Estimate planetary parameters
         masse = tbl_toi['Predicted Mass (M_Earth)'][i]
@@ -104,7 +89,7 @@ for i in range(number_toi):
         rv_amplitude = semiamp(
             tbl_toi['Period (days)'][i], masse,
             tbl_toi['Planet Radius (R_Earth)'][i],
-            float(stellar_params['Mass (M_Sun)'][0]), 90, 0
+            float(stellar_params['mass']), 90, 0
         )
 
         # Add row to table
@@ -117,21 +102,21 @@ for i in range(number_toi):
         tbl[-1]['ra'] = Angle(tbl_toi['RA'][i], unit=u.hour).deg
         tbl[-1]['dec'] = Angle(tbl_toi['Dec'][i], unit=u.deg).deg
         tbl[-1]['st_rad'] = tbl_toi['Stellar Radius (R_Sun)'][i]
-        tbl[-1]['st_mass'] = stellar_params['Mass (M_Sun)'][0]
-        tbl[-1]['st_lum'] = stellar_params['Luminosity'][0]
+        tbl[-1]['st_mass'] = stellar_params['mass']
+        tbl[-1]['st_lum'] = stellar_params['lum']
         tbl[-1]['st_teff'] = tbl_toi['Stellar Eff Temp (K)'][i]
         tbl[-1]['st_spectype'] = '0'
         tbl[-1]['sy_dist'] = tbl_toi['Stellar Distance (pc)'][i]
-        if len(idx_v) == 1:
-            tbl[-1]['sy_vmag'] = magnitudes['Value'][idx_v]
-        if len(idx_g) == 1:
-            tbl[-1]['sy_gaiamag'] = magnitudes['Value'][idx_g]
-        if len(idx_j) == 1:
-            tbl[-1]['sy_jmag'] = magnitudes['Value'][idx_j]
-        if len(idx_h) == 1:
-            tbl[-1]['sy_hmag'] = magnitudes['Value'][idx_h]
-        if len(idx_k) == 1:
-            tbl[-1]['sy_kmag'] = magnitudes['Value'][idx_k]
+        if 'V' in mag_lookup:
+            tbl[-1]['sy_vmag'] = mag_lookup['V']
+        if 'Gaia' in mag_lookup:
+            tbl[-1]['sy_gaiamag'] = mag_lookup['Gaia']
+        if 'J' in mag_lookup:
+            tbl[-1]['sy_jmag'] = mag_lookup['J']
+        if 'H' in mag_lookup:
+            tbl[-1]['sy_hmag'] = mag_lookup['H']
+        if 'K' in mag_lookup:
+            tbl[-1]['sy_kmag'] = mag_lookup['K']
         tbl[-1]['pl_name'] = f'TOI {tbl_toi["TOI"][i]}'
         tbl[-1]['pl_bmassprov'] = 'Mass Estimate'
         tbl[-1]['pl_bmasse'] = np.round(masse, 2)
@@ -274,8 +259,6 @@ mask_idx = np.where(tbl['pl_atmosig'].mask)[0]
 tbl['pl_atmosig'][mask_idx] = 0
 
 # TSM
-#tsm_col = Column(name='pl_tsm', data=np.zeros(len(tbl['pl_name'])))
-#tbl.add_column(tsm_col, 67)
 tsm = np.zeros(len(tbl['pl_name']))
 for i in range(len(tsm)):
     tsm[i] = TSM(
@@ -288,8 +271,6 @@ mask_idx = np.where(tbl['pl_tsm'].mask)[0]
 tbl['pl_tsm'][mask_idx] = 0
 
 # ESM
-#esm_col = Column(name='pl_esm', data=np.zeros(len(tbl['pl_name'])))
-#tbl.add_column(esm_col, 68)
 esm = np.zeros(len(tbl['pl_name']))
 for i in range(len(esm)):
     esm[i] = ESM(
@@ -440,11 +421,11 @@ kmag = find_na(tbl["sy_kmag"])
 size = scaleMag(tbl["sy_jmag"])
 
 # Color of data points
-c = logscale(tbl['pl_eqt'])
-colors = plt.cm.viridis(c, 1, True)
-c_dict['bokeh'] = np.array(["#%02x%02x%02x" % (r, g, b) for r, g, b in colors[:,0:3]])
-index, = np.where(tbl['pl_eqt'] == 0)
-c_dict['bokeh'][index] = '#707070'
+# c = logscale(tbl['pl_eqt'])
+# colors = plt.cm.viridis(c, 1, True)
+# c_dict['bokeh'] = np.array(["#%02x%02x%02x" % (r, g, b) for r, g, b in colors[:,0:3]])
+# index, = np.where(tbl['pl_eqt'] == 0)
+# c_dict['bokeh'][index] = '#707070'
 c_dict['edge'] = np.array(len(name)*['black'])
 c_dict['edge'][k2_idx] = 'blue'
 c_dict['edge'][-number_toi:] = 'red'
@@ -486,6 +467,60 @@ axis_map = {
     "K mag.": "kmag"}
 axis_map_list = [i for i in axis_map.keys()]
 
+
+# Color of data points
+colormap_columns = {
+    "stmass": "st_mass",
+    "stradius": "st_rad",
+    "stlum": "st_lum",
+    "teff": "st_teff",
+    "dist": "sy_dist",
+    "mass": "pl_bmasse",
+    "rade": "pl_rade",
+    "rho": "pl_dens",
+    "period": "pl_orbper",
+    "semima": "pl_orbsmax",
+    "teq": "pl_eqt",
+    "insol": "pl_insol",
+    "depth": "pl_trandep",
+    "dur": "pl_trandur",
+    "atmosignal": "pl_atmosig",
+    "tsm": "pl_tsm",
+    "esm": "pl_esm",
+    "K": "pl_rvamp",
+    "vmag": "sy_vmag",
+    "gmag": "sy_gaiamag",
+    "jmag": "sy_jmag",
+    "hmag": "sy_hmag",
+    "kmag": "sy_kmag",
+}
+
+label_by_key = {v: k for k, v in axis_map.items()}  # e.g. "teq" -> "Planetary Teq (K)"
+
+color_arrays = {}    # color_arrays["teq"] -> hex color array, one per row
+color_ranges = {}    # color_ranges["teq"] -> [low, high] for the ColorBar
+color_options = []   # dropdown labels for parameters that computed cleanly
+
+for key, colname in colormap_columns.items():
+    try:
+        col = tbl[colname]
+        c = logscale(col)
+        rgba = plt.cm.viridis(c, 1, True)
+        hexcolors = np.array(["#%02x%02x%02x" % (r, g, b) for r, g, b in rgba[:, 0:3]])
+        zero_idx, = np.where(col == 0)
+        hexcolors[zero_idx] = '#707070'
+        color_arrays[key] = hexcolors
+        color_ranges[key] = [float(min_val(col)), float(max_val(col))]
+        color_options.append(label_by_key[key])
+    except Exception as e:
+        # Skip parameters that can't be color-mapped (e.g. an all-zero/
+        # all-masked column) instead of breaking the whole page.
+        print(f"Skipping '{key}' as a colorbar option: {e}")
+
+default_color_key = "teq"
+c_dict['bokeh'] = color_arrays[default_color_key]
+
+
 # Create Widgets
 x_axis = Select(title = "X Axis",
                 options = axis_map_list,
@@ -497,8 +532,9 @@ y_axis = Select(title="Y Axis",
                 width = 260)
 inverted = CheckboxButtonGroup(labels=["Inverse X", "Inverse Y"], width = 260)
 color_select = Select(title = "Colorbar",
-                      options = ["Planetary Teq (K)", "In a future release"],
-                      value = "Planetary Teq (K)", width = 260)
+                      options = color_options,
+                      value = label_by_key[default_color_key],
+                      width = 260)
 ra_min_slider = Slider(title = "RA min (hr)",
                        start = 0,
                        end = 24,
@@ -553,6 +589,9 @@ Contact: <a href="mailto:charles.cadieux@unige.ch">charles.cadieux@unige.ch</a>
 figure_title = Div(text = """<font size="+1"> <b> iExoView: The Interactive Exoplanet Viewer </b> </font>""",
                    height = 30)
 
+# One field per colormap parameter, e.g. bokeh_colors_teq, bokeh_colors_mass, ...
+color_fields = {f'bokeh_colors_{key}': arr for key, arr in color_arrays.items()}
+
 source_available = ColumnDataSource(data = dict(x = period,
                                                 y = rade,
                                                 hostname = hostname,
@@ -601,7 +640,9 @@ source_available = ColumnDataSource(data = dict(x = period,
                                                 K_colors = c_dict['K'],
                                                 red_colors = c_dict['red'],
                                                 lum_colors = c_dict['lum'],
-                                                depth_colors = c_dict['depth']))
+                                                depth_colors = c_dict['depth'],
+                                                **color_fields
+                                                ))                                          
 
 source_visible = ColumnDataSource(data = dict(x = source_available.data[axis_map[x_axis.value]],
                                               y = source_available.data[axis_map[y_axis.value]],
@@ -651,7 +692,9 @@ source_visible = ColumnDataSource(data = dict(x = source_available.data[axis_map
                                               K_colors = c_dict['K'],
                                               red_colors = c_dict['red'],
                                               lum_colors = c_dict['lum'],
-                                              depth_colors = c_dict['depth']))
+                                              depth_colors = c_dict['depth'],
+                                              **color_fields
+                                            ))
 
 # Tools to interact with the figure (documentation available at
 # https://docs.bokeh.org/en/latest/index.html)
@@ -821,6 +864,25 @@ yaxis.major_label_text_font_size = '12pt'
 p.add_layout(xaxis, 'below')
 p.add_layout(yaxis, 'left')
 
+p.add_layout(yaxis, 'left')
+
+# Color map
+color_bar = ColorBar(color_mapper = LogColorMapper(palette = "Viridis256",
+                                            low = color_ranges[default_color_key][0],
+                                            high = color_ranges[default_color_key][1]),
+                     ticker = LogTicker(),
+                     label_standoff = 10,
+                     border_line_color = None,
+                     location = (0, 0),
+                     title = label_by_key[default_color_key],
+                     title_standoff = 10,
+                     title_text_align = "center",
+                     title_text_font_style = 'italic',
+                     title_text_font_size='12pt')
+p.add_layout(color_bar, 'right')
+
+#### User interaction ####
+
 #### User interaction ####
 
 # Opens a new window when clicking on a data point
@@ -836,6 +898,9 @@ with open('js/callback_button.js') as f:
 callback_button = CustomJS(args = dict(source_available = source_available,
                                        source_visible = source_visible,
                                        axis_map = axis_map,
+                                       color_select = color_select,
+                                       color_bar = color_bar,
+                                       color_ranges = color_ranges,
                                        ra_min_slider = ra_min_slider,
                                        ra_max_slider = ra_max_slider,
                                        dec_slider = dec_slider,
@@ -900,6 +965,11 @@ callback_reset = CustomJS(args = dict(p = p,
                                       rade_slider = rade_slider,
                                       x_axis = x_axis,
                                       y_axis = y_axis,
+                                      color_select = color_select,
+                                      color_bar = color_bar,
+                                      color_ranges = color_ranges,
+                                      default_color_key = default_color_key,
+                                      default_color_label = label_by_key[default_color_key],
                                       search = search,
                                       button = button,
                                       checkbox = checkbox,
@@ -907,6 +977,18 @@ callback_reset = CustomJS(args = dict(p = p,
                                       title = p.title,
                                       titlestr = titlestr),
                            code = script)
+
+# Change colormap parameter
+with open('js/callback_color.js') as f:
+    script = f.read()
+callback_color = CustomJS(args = dict(source_visible = source_visible,
+                                      axis_map = axis_map,
+                                      color_bar = color_bar,
+                                      color_ranges = color_ranges,
+                                      teff_slider = teff_slider,
+                                      rade_slider = rade_slider),
+                          code = script)
+color_select.js_on_change('value', callback_color)
 
 # Clear search
 with open('js/callback_clear.js') as f:
@@ -1049,21 +1131,6 @@ label = Label(x = x0,
               text_font_size = '10pt')
 j_mag_legend.add_layout(label)
 
-# Color map
-color_bar = ColorBar(color_mapper = LogColorMapper(palette = "Viridis256",
-                                            low = min_val(tbl['pl_eqt']),
-                                            high = max_val(tbl['pl_eqt'])),
-                     ticker = LogTicker(),
-                     label_standoff = 10,
-                     border_line_color = None,
-                     location = (0, 0),
-                     title = 'Planetary Teq (K)',
-                     title_standoff = 10,
-                     title_text_align = "center",
-                     title_text_font_style = 'italic',
-                     title_text_font_size='12pt')
-p.add_layout(color_bar, 'right')
-
 # Layout
 ra_sliders = row(ra_min_slider, ra_max_slider)
 buttons = row(button, reset, help_button)
@@ -1086,7 +1153,7 @@ widgets = column(x_axis,
                  width=300)
 # Layout
 legends = column(legend, j_mag_legend, align="end")
-layout = row(widgets, Spacer(width=10), p, legends)
+layout = row(widgets, p, legends)
 layout = column(figure_title, layout)
 
 # %%
